@@ -27,6 +27,7 @@ OBJS = \
 	uart.o\
 	vectors.o\
 	vm.o\
+	rand.o\
 
 # Cross-compiling (e.g., on Mac OS X)
 # TOOLPREFIX = i386-jos-elf
@@ -52,6 +53,7 @@ endif
 
 # If the makefile can't find QEMU, specify its path here
 # QEMU = qemu-system-i386
+QEMU = /usr/libexec/qemu-kvm
 
 # Try to infer the correct QEMU
 ifndef QEMU

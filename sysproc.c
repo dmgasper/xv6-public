@@ -7,6 +7,8 @@
 #include "mmu.h"
 #include "proc.h"
 
+#include "pstat.h"
+
 int
 sys_fork(void)
 {
@@ -88,4 +90,12 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+int sys_settickets(int num){
+  if (num < 1) return -1;
+  return 0;
+}
+int sys_getpinfo(struct pstat* pstat){
+  return 0;
 }
