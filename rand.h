@@ -1,1 +1,1 @@
-double lfsr113();
+int randInt(void);

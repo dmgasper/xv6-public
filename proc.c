@@ -6,10 +6,12 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "pstat.h"
 
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
+  struct pstat procstat;
 } ptable;
 
 static struct proc *initproc;
@@ -24,6 +26,16 @@ void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+
+  acquire(&ptable.lock);
+  for (int i = 0; i < NPROC; i++)
+  {
+    ptable.procstat.inuse[i] = 0;
+    ptable.procstat.pid[i] = 0;
+    ptable.procstat.hticks[i] = 0;
+    ptable.procstat.lticks[i] = 0;
+  }
+  release(&ptable.lock);
 }
 
 // Must be called with interrupts disabled
@@ -78,9 +90,14 @@ allocproc(void)
 
   acquire(&ptable.lock);
 
+  int i = 0;
+
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+  {
     if(p->state == UNUSED)
       goto found;
+    i++;
+  }
 
   release(&ptable.lock);
   return 0;
@@ -88,12 +105,20 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->priority = 0; // High priority
+  p->numtickets = 1; // By default, each process gets one ticket
+
+  ptable.procstat.inuse[i] = 1;
+  ptable.procstat.pid[i] = p->pid;
+  ptable.procstat.hticks[i] = 0;
+  ptable.procstat.lticks[i] = 0;
 
   release(&ptable.lock);
 
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
     p->state = UNUSED;
+    ptable.procstat.inuse[i] = 0;
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
@@ -280,6 +305,7 @@ wait(void)
   for(;;){
     // Scan through table looking for exited children.
     havekids = 0;
+    int i = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->parent != curproc)
         continue;
@@ -295,9 +321,12 @@ wait(void)
         p->name[0] = 0;
         p->killed = 0;
         p->state = UNUSED;
+
+        ptable.procstat.inuse[i] = 0;
         release(&ptable.lock);
         return pid;
       }
+      i++;
     }
 
     // No point waiting if we don't have any children.
@@ -325,6 +354,9 @@ scheduler(void)
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
+
+  struct proc *highpriority[NPROC];
+  struct proc *lowpriority[NPROC];
   
   for(;;){
     // Enable interrupts on this processor.
@@ -332,9 +364,40 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+
+    for (int i = 0; i < NPROC; i++)
+    {
+      highpriority[i] = 0;
+      lowpriority[i] = 0;
+    }
+
+    int i = 0;
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state == RUNNING) //Increment the appropriate number of ticks
+      {
+        if(p->priority == 0)
+          ptable.procstat.hticks[i] += 1;
+
+        if(p->priority == 1)
+          ptable.procstat.lticks[i] += 1;
+      }
+
       if(p->state != RUNNABLE)
+      {
+        if(p->priority == 0 && highpriority[i] == 0)
+        {
+          highpriority[i] = lowpriority[i];
+          lowpriority[i] = 0;
+        }
+
+        if (p->priority == 1 && lowpriority[i] == 0)
+        {
+          lowpriority[i] = highpriority[i];
+          highpriority[i] = 0;
+        }
+
         continue;
+      }
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -342,6 +405,10 @@ scheduler(void)
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
+
+      // Downgrade process to low priority if it has used up its high priority time slices 
+      if(ptable.procstat.hticks[i] >= 1 && p->priority == 0)
+        p->priority = 1;
 
       swtch(&(c->scheduler), p->context);
       switchkvm();
@@ -351,7 +418,7 @@ scheduler(void)
       c->proc = 0;
     }
     release(&ptable.lock);
-
+    i++;
   }
 }
 

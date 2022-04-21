@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "mmu.h"
 #include "proc.h"
+#include "rand.h"
 
 #include "pstat.h"
 
@@ -94,8 +95,16 @@ sys_uptime(void)
 
 int sys_settickets(int num){
   if (num < 1) return -1;
+  myproc()->tickets = num;
   return 0;
 }
 int sys_getpinfo(struct pstat* pstat){
   return 0;
+}
+
+int
+sys_randint(void)
+{
+  int num = randInt();
+  return num;
 }
