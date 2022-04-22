@@ -1,3 +1,5 @@
+#include "pstat.h"
+
 // Per-CPU state
 struct cpu {
   uchar apicid;                // Local APIC ID
@@ -52,6 +54,8 @@ struct proc {
   int priority;                // Process priority
   int numtickets;              // Number of lottery tickets
 };
+
+int getpstat(struct pstat*);
 
 // Process memory is laid out contiguously, low addresses first:
 //   text

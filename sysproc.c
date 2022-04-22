@@ -95,11 +95,14 @@ sys_uptime(void)
 
 int sys_settickets(int num){
   if (num < 1) return -1;
-  myproc()->tickets = num;
+  myproc()->numtickets = num;
   return 0;
 }
-int sys_getpinfo(struct pstat* pstat){
-  return 0;
+
+int sys_getpinfo(void){
+  struct pstat pstat;
+  argptr(0, (void*)&pstat, sizeof(struct pstat));
+  return getpstat(&pstat);
 }
 
 int

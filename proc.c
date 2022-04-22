@@ -16,6 +16,9 @@ struct {
 
 static struct proc *initproc;
 
+struct proc *highpriority[NPROC];
+struct proc *lowpriority[NPROC];
+
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
@@ -34,6 +37,8 @@ pinit(void)
     ptable.procstat.pid[i] = 0;
     ptable.procstat.hticks[i] = 0;
     ptable.procstat.lticks[i] = 0;
+    highpriority[i] = 0;
+    lowpriority[i] = 0;
   }
   release(&ptable.lock);
 }
@@ -354,9 +359,6 @@ scheduler(void)
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
-
-  struct proc *highpriority[NPROC];
-  struct proc *lowpriority[NPROC];
   
   for(;;){
     // Enable interrupts on this processor.
@@ -367,37 +369,61 @@ scheduler(void)
 
     for (int i = 0; i < NPROC; i++)
     {
-      highpriority[i] = 0;
+      highpriority[i] = &ptable.proc[i];
       lowpriority[i] = 0;
     }
 
+    // High priority processes
     int i = 0;
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    for(p = *highpriority; p < highpriority[NPROC - 1]; p++){
+      if (p == 0)
+        continue;
+
       if(p->state == RUNNING) //Increment the appropriate number of ticks
       {
-        if(p->priority == 0)
-          ptable.procstat.hticks[i] += 1;
-
-        if(p->priority == 1)
-          ptable.procstat.lticks[i] += 1;
+        ptable.procstat.hticks[i] += 1;
       }
 
       if(p->state != RUNNABLE)
-      {
-        if(p->priority == 0 && highpriority[i] == 0)
-        {
-          highpriority[i] = lowpriority[i];
-          lowpriority[i] = 0;
-        }
-
-        if (p->priority == 1 && lowpriority[i] == 0)
-        {
-          lowpriority[i] = highpriority[i];
-          highpriority[i] = 0;
-        }
-
         continue;
+
+      // Switch to chosen process.  It is the process's job
+      // to release ptable.lock and then reacquire it
+      // before jumping back to us.
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      c->proc = 0;
+
+      // Downgrade process to low priority if it has used up its high priority time slices 
+      if(ptable.procstat.hticks[i] >= 1)
+      {
+        p->priority = 1;
+        lowpriority[i] = p;
+        highpriority[i] = 0;
       }
+      i++;
+    }
+
+    // Low priority processes
+    i = 0;
+    for(p = *lowpriority; p < lowpriority[NPROC - 1]; p++){
+      if (p == 0)
+        continue;
+
+      if(p->state == RUNNING) //Increment the appropriate number of ticks
+      {
+        ptable.procstat.lticks[i] += 1;
+      }
+
+      if(p->state != RUNNABLE)
+        continue;
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -416,9 +442,65 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
+
+      // "Relinquish the CPU" after two time slices
+      if(ptable.procstat.hticks[i] >= 2)
+      {
+        p->state = SLEEPING;
+      }
+      i++;
     }
     release(&ptable.lock);
-    i++;
+
+    // // Low priority processes
+    // int i = 0;
+    // for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    //   if(p->state == RUNNING) //Increment the appropriate number of ticks
+    //   {
+    //     if(p->priority == 0)
+    //       ptable.procstat.hticks[i] += 1;
+
+    //     if(p->priority == 1)
+    //       ptable.procstat.lticks[i] += 1;
+    //   }
+
+    //   if(p->state != RUNNABLE)
+    //   {
+    //     if(p->priority == 0 && highpriority[i] == 0)
+    //     {
+    //       highpriority[i] = lowpriority[i];
+    //       lowpriority[i] = 0;
+    //     }
+
+    //     if (p->priority == 1 && lowpriority[i] == 0)
+    //     {
+    //       lowpriority[i] = highpriority[i];
+    //       highpriority[i] = 0;
+    //     }
+
+    //     continue;
+    //   }
+
+    //   // Switch to chosen process.  It is the process's job
+    //   // to release ptable.lock and then reacquire it
+    //   // before jumping back to us.
+    //   c->proc = p;
+    //   switchuvm(p);
+    //   p->state = RUNNING;
+
+    //   // Downgrade process to low priority if it has used up its high priority time slices 
+    //   if(ptable.procstat.hticks[i] >= 1 && p->priority == 0)
+    //     p->priority = 1;
+
+    //   swtch(&(c->scheduler), p->context);
+    //   switchkvm();
+
+    //   // Process is done running for now.
+    //   // It should have changed its p->state before coming back.
+    //   c->proc = 0;
+    // }
+    // release(&ptable.lock);
+    // i++;
   }
 }
 
@@ -598,4 +680,23 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+int
+getpstat(struct pstat* procstat)
+{
+  if(procstat == 0)
+    return -1;
+    
+  acquire(&ptable.lock);
+  //Deep copy everything from ptable.procstat to the *procstat
+  for (int i = 0; i < NPROC; i++)
+  {
+    procstat->inuse[i] = ptable.procstat.inuse[i];
+    procstat->pid[i] = ptable.procstat.pid[i];
+    procstat->hticks[i] = ptable.procstat.hticks[i];
+    procstat->lticks[i] = ptable.procstat.lticks[i];
+  }
+  release(&ptable.lock);
+  return 0;
 }
