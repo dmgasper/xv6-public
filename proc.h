@@ -53,10 +53,12 @@ struct proc {
   char name[16];               // Process name (debugging)
   int priority;                // Process priority
   int numtickets;              // Number of lottery tickets
+  int hticks;
+  int lticks;
 };
 
 int getpstat(struct pstat*);
-
+void settotalnumtickets(int);
 // Process memory is laid out contiguously, low addresses first:
 //   text
 //   original data and bss

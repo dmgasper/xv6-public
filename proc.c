@@ -7,6 +7,7 @@
 #include "proc.h"
 #include "spinlock.h"
 #include "pstat.h"
+#include "rand.h"
 
 struct {
   struct spinlock lock;
@@ -18,6 +19,8 @@ static struct proc *initproc;
 
 struct proc *highpriority[NPROC];
 struct proc *lowpriority[NPROC];
+
+static int totalnumtickets = 0;
 
 int nextpid = 1;
 extern void forkret(void);
@@ -112,11 +115,16 @@ found:
   p->pid = nextpid++;
   p->priority = 0; // High priority
   p->numtickets = 1; // By default, each process gets one ticket
+  p->hticks = 0;
+  p->lticks = 0;
 
+  // Initialize status table
   ptable.procstat.inuse[i] = 1;
   ptable.procstat.pid[i] = p->pid;
   ptable.procstat.hticks[i] = 0;
   ptable.procstat.lticks[i] = 0;
+  highpriority[i] = &ptable.proc[i];
+
 
   release(&ptable.lock);
 
@@ -141,6 +149,8 @@ found:
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
+
+  totalnumtickets += 1;
 
   return p;
 }
@@ -327,7 +337,6 @@ wait(void)
         p->killed = 0;
         p->state = UNUSED;
 
-        ptable.procstat.inuse[i] = 0;
         release(&ptable.lock);
         return pid;
       }
@@ -361,31 +370,24 @@ scheduler(void)
   c->proc = 0;
   
   for(;;){
+    int tickets = randInt() % totalnumtickets;
     // Enable interrupts on this processor.
     sti();
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
 
-    for (int i = 0; i < NPROC; i++)
-    {
-      highpriority[i] = &ptable.proc[i];
-      lowpriority[i] = 0;
-    }
-
     // High priority processes
-    int i = 0;
-    for(p = *highpriority; p < highpriority[NPROC - 1]; p++){
-      if (p == 0)
-        continue;
-
-      if(p->state == RUNNING) //Increment the appropriate number of ticks
-      {
-        ptable.procstat.hticks[i] += 1;
-      }
+    for(int ip = 0; ip < NPROC; ip++){
+      p = highpriority[ip];
+      if (p == 0) continue;
+      if (p->pid == 0) continue;
 
       if(p->state != RUNNABLE)
         continue;
+
+      tickets -= p->numtickets;
+      if (tickets > 0) continue;
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -397,33 +399,33 @@ scheduler(void)
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
+      p->hticks += 1;
+      ptable.procstat.hticks[ip] += 1;
+
+      // Downgrade process to low priority if it has used up its high priority time slices 
+      p->priority = 1;
+      lowpriority[ip] = p;
+      highpriority[ip] = 0;
+      p->lticks = 0;
+
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
-
-      // Downgrade process to low priority if it has used up its high priority time slices 
-      if(ptable.procstat.hticks[i] >= 1)
-      {
-        p->priority = 1;
-        lowpriority[i] = p;
-        highpriority[i] = 0;
-      }
-      i++;
     }
+
+    tickets = randInt() % totalnumtickets;
 
     // Low priority processes
-    i = 0;
-    for(p = *lowpriority; p < lowpriority[NPROC - 1]; p++){
-      if (p == 0)
-        continue;
-
-      if(p->state == RUNNING) //Increment the appropriate number of ticks
-      {
-        ptable.procstat.lticks[i] += 1;
-      }
+    for(int ip = 0; ip < NPROC; ip++){
+      p = lowpriority[ip];
+      if (p == 0) continue;
+      if (p->pid == 0) continue;
 
       if(p->state != RUNNABLE)
         continue;
+
+      tickets -= p->numtickets;
+      if (tickets > 0) continue;
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -432,75 +434,37 @@ scheduler(void)
       switchuvm(p);
       p->state = RUNNING;
 
-      // Downgrade process to low priority if it has used up its high priority time slices 
-      if(ptable.procstat.hticks[i] >= 1 && p->priority == 0)
-        p->priority = 1;
-
       swtch(&(c->scheduler), p->context);
       switchkvm();
+
+      p->lticks += 1;
+      ptable.procstat.lticks[ip] += 1;
+
+      // "Relinquish the CPU" after two time slices
+      if (p->lticks >= 2)
+      {
+        p->priority = 0;
+        lowpriority[ip] = 0;
+        sleep(p, &ptable.lock);
+      }
 
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
+    }
 
-      // "Relinquish the CPU" after two time slices
-      if(ptable.procstat.hticks[i] >= 2)
-      {
-        p->state = SLEEPING;
-      }
+    // Go back through the process table and stuff everything back onto highpriority
+    int i = 0;
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+
+      highpriority[i] = p;
+      lowpriority[i] = 0;
+      p->hticks = 0;
+      p->lticks = 0;
       i++;
     }
+
     release(&ptable.lock);
-
-    // // Low priority processes
-    // int i = 0;
-    // for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-    //   if(p->state == RUNNING) //Increment the appropriate number of ticks
-    //   {
-    //     if(p->priority == 0)
-    //       ptable.procstat.hticks[i] += 1;
-
-    //     if(p->priority == 1)
-    //       ptable.procstat.lticks[i] += 1;
-    //   }
-
-    //   if(p->state != RUNNABLE)
-    //   {
-    //     if(p->priority == 0 && highpriority[i] == 0)
-    //     {
-    //       highpriority[i] = lowpriority[i];
-    //       lowpriority[i] = 0;
-    //     }
-
-    //     if (p->priority == 1 && lowpriority[i] == 0)
-    //     {
-    //       lowpriority[i] = highpriority[i];
-    //       highpriority[i] = 0;
-    //     }
-
-    //     continue;
-    //   }
-
-    //   // Switch to chosen process.  It is the process's job
-    //   // to release ptable.lock and then reacquire it
-    //   // before jumping back to us.
-    //   c->proc = p;
-    //   switchuvm(p);
-    //   p->state = RUNNING;
-
-    //   // Downgrade process to low priority if it has used up its high priority time slices 
-    //   if(ptable.procstat.hticks[i] >= 1 && p->priority == 0)
-    //     p->priority = 1;
-
-    //   swtch(&(c->scheduler), p->context);
-    //   switchkvm();
-
-    //   // Process is done running for now.
-    //   // It should have changed its p->state before coming back.
-    //   c->proc = 0;
-    // }
-    // release(&ptable.lock);
-    // i++;
   }
 }
 
@@ -699,4 +663,9 @@ getpstat(struct pstat* procstat)
   }
   release(&ptable.lock);
   return 0;
+}
+
+void settotalnumtickets(int num)
+{
+  totalnumtickets = num;
 }
